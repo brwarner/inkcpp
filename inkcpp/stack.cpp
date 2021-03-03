@@ -1,4 +1,5 @@
 #include "stack.h"
+#include "string_table.h"
 
 namespace ink::runtime::internal
 {
@@ -33,14 +34,14 @@ namespace ink::runtime::internal
 			}
 
 			// If this is an end thread marker, skip over it
-			if (skip == ~0 && e.data.get_data_type() == data_type::thread_end) {
-				skip = e.data.as_divert();
+			if (skip == ~0 && e.data.type() == value_type::thread_end) {
+				skip = e.data.get<value_type::thread_end>();
 			}
 
 			// If we're skipping
 			if (skip != ~0) {
 				// Stop if we get to the start of the thread block
-				if (e.data.get_data_type() == data_type::thread_start && skip == e.data.as_divert()) {
+				if (e.data.type() == value_type::thread_start && skip == e.data.get<value_type::thread_start>().jump) {
 					skip = ~0;
 				}
 
@@ -49,10 +50,10 @@ namespace ink::runtime::internal
 			}
 
 			// Is it a thread start or a jump marker
-			if (e.name == InvalidHash && (e.data.get_data_type() == data_type::thread_start || e.data.get_data_type() == data_type::jump_marker))
+			if (e.name == InvalidHash && (e.data.type() == value_type::thread_start || e.data.type() == value_type::jump_marker))
 			{
 				// If this thread start has a jump value
-				uint32_t jump = e.data.thread_jump();
+				uint32_t jump = e.data.get<value_type::jump_marker>().thread_id;
 
 				// Then we need to do some jumping. Skip
 				if (jump > 0) {
@@ -100,24 +101,20 @@ namespace ink::runtime::internal
 		return nullptr;
 	}
 
-	void basic_stack::push_frame(offset_t return_to, frame_type type)
+	template<>
+	void basic_stack::push_frame<frame_type::function>(offset_t return_to)
 	{
-		data_type frameDataType;
-		switch (type)
-		{
-		case frame_type::tunnel:
-			frameDataType = data_type::tunnel_frame;
-			break;
-		case frame_type::function:
-			frameDataType = data_type::function_frame;
-			break;
-		case frame_type::thread:
-			frameDataType = data_type::thread_frame;
-			break;
-		}
-
-		// Add to top of stack
-		add(InvalidHash, value(return_to, frameDataType));
+		add(InvalidHash, value{}.set<value_type::function_frame>(return_to));
+	}
+	template<>
+	void basic_stack::push_frame<frame_type::tunnel>(offset_t return_to)
+	{
+		add(InvalidHash, value{}.set<value_type::tunnel_frame>(return_to));
+	}
+	template<>
+	void basic_stack::push_frame<frame_type::thread>(offset_t return_to)
+	{
+		add(InvalidHash, value{}.set<value_type::thread_frame>(return_to));
 	}
 
 	const entry* basic_stack::pop()
@@ -131,27 +128,33 @@ namespace ink::runtime::internal
 		iterator threadIter = jumpStart;
 
 		// Get a reference to its jump count
-		uint32_t& jump = threadIter.get()->data.thread_jump();
+		value& start = threadIter.get()->data;
+		value_type vt = start.type();
+		auto jump = start.get<value_type::jump_marker>();
 
 		// Move over it
 		threadIter.next();
 
 		// Move back over the current jump value
-		for (uint32_t i = 0; i < jump; i++)
+		for (uint32_t i = 0; i < jump.thread_id; i++)
 			threadIter.next();
 
 		// Now keep iterating back until we get to a frame marker
-		while (!threadIter.done() && (threadIter.get()->name != InvalidHash || threadIter.get()->data.is_thread_marker()))
+		// FIXME: meta types or subtypes?
+		while (!threadIter.done() && (threadIter.get()->name != InvalidHash
+					|| threadIter.get()->data.type() == value_type::thread_start
+					|| threadIter.get()->data.type() == value_type::thread_end))
 		{
 			// If we've hit an end of thread marker
 			auto e = threadIter.get();
-			if (e->data.is_thread_end())
+			if (e->data.type() == value_type::thread_end)
 			{
 				// We basically want to skip until we get to the start of this thread (leave the block alone)
-				thread_t tid = e->data.as_thread_id();
-				while (!threadIter.get()->data.is_thread_start() || threadIter.get()->data.as_thread_id() != tid)
+				thread_t tid = e->data.get<value_type::thread_end>();
+				while (threadIter.get()->data.type() != value_type::thread_start
+						|| threadIter.get()->data.get<value_type::thread_start>().jump != tid)
 				{
-					jump++;
+					jump.thread_id++;
 					threadIter.next();
 				}
 
@@ -159,25 +162,32 @@ namespace ink::runtime::internal
 			}
 
 			threadIter.next();
-			jump++;
+			jump.thread_id++;
 		}
 
 		// Move us over the frame marker
-		jump++;
+		jump.thread_id++;
 
 		// Now that thread marker is set to the correct jump value.
+		if (vt == value_type::jump_marker) {
+			start.set<value_type::jump_marker>(jump);
+		} else if (vt == value_type::thread_start) {
+			start.set<value_type::thread_start>(jump);
+		} else {
+			throw ink_exception("unknown jump type");
+		}
 		return threadIter.get();
 	}
 
-	frame_type get_frame_type(data_type type)
+	frame_type get_frame_type(value_type type)
 	{
 		switch (type)
 		{
-		case data_type::tunnel_frame:
+		case value_type::tunnel_frame:
 			return frame_type::tunnel;
-		case data_type::function_frame:
+		case value_type::function_frame:
 			return frame_type::function;
-		case data_type::thread_frame:
+		case value_type::thread_frame:
 			return frame_type::thread;
 		default:
 			inkAssert(false, "Unknown frame type detected");
@@ -206,14 +216,18 @@ namespace ink::runtime::internal
 
 			// We now have a frame marker. Check if it's a thread
 			// Thread handling
-			if (frame->data.is_thread_marker() || frame->data.is_jump_marker())
+			if (
+			// FIXME: is_tghead_marker, is_jump_marker
+					frame->data.type() == value_type::thread_start
+				|| 	frame->data.type() == value_type::thread_end
+				||  frame->data.type() == value_type::jump_marker
+				)
 			{
 				// End of thread marker, we need to create a jump marker
-				if (frame->data.get_data_type() == data_type::thread_end)
+				if (frame->data.type() == value_type::thread_end)
 				{
 					// Push a new jump marker after the thread end
-					entry& jump = push({ InvalidHash, value(0, data_type::jump_marker) });
-					jump.data.thread_jump() = 0;
+					entry& jump = push({ InvalidHash, value{}.set<value_type::jump_marker>(0u,0u) });
 
 					// Do a pop back
 					returnedFrame = do_thread_jump_pop(base::begin());
@@ -221,7 +235,7 @@ namespace ink::runtime::internal
 				}
 
 				// If this is a jump marker, we actually want to extend it to the next frame
-				if (frame->data.is_jump_marker())
+				if (frame->data.type() == value_type::jump_marker)
 				{
 					// Use the thread jump pop method using this jump marker
 					returnedFrame = do_thread_jump_pop(iter);
@@ -229,7 +243,7 @@ namespace ink::runtime::internal
 				}
 
 				// Popping past thread start
-				if (frame->data.get_data_type() == data_type::thread_start)
+				if (frame->data.type() == value_type::thread_start)
 				{
 					returnedFrame = do_thread_jump_pop(iter);
 					break;
@@ -245,17 +259,19 @@ namespace ink::runtime::internal
 		inkAssert(returnedFrame, "Attempting to pop_frame when no frames exist! Stack reset.");
 
 		// Make sure we're not somehow trying to "return" from a thread
-		inkAssert(returnedFrame->data.get_data_type() != data_type::thread_start && returnedFrame->data.get_data_type() != data_type::thread_end,
+		inkAssert(returnedFrame->data.type() != value_type::thread_start
+				&& returnedFrame->data.type() != value_type::thread_end,
 			"Can not return from a thread! How did this happen?");
 
 		// Store frame type
 		if (type != nullptr)
 		{
-			*type = get_frame_type(returnedFrame->data.get_data_type());
+			*type = get_frame_type(returnedFrame->data.type());
 		}
 
 		// Return the offset stored in the frame record
-		return returnedFrame->data.as_divert();
+		// FIXME: correct type?
+		return returnedFrame->data.get<value_type::jump_marker>().jump;
 	}
 
 	bool basic_stack::has_frame(frame_type* returnType) const
@@ -280,21 +296,21 @@ namespace ink::runtime::internal
 
 			// If we're skipping over a thread, wait until we hit its start before checking
 			if (thread != ~0) {
-				if (elem.data.is_thread_start() && elem.data.as_thread_id() == thread)
+				if (elem.data.type() == value_type::thread_start && elem.data.get<value_type::thread_start>().jump == thread)
 					thread = ~0;
 
 				return false;
 			}
 
 			// If it's a jump marker or a thread start
-			if (elem.data.is_jump_marker() || elem.data.is_thread_start()) {
-				jumping = elem.data.thread_jump();
+			if (elem.data.type() == value_type::jump_marker || elem.data.type() == value_type::thread_start) {
+				jumping = elem.data.get<value_type::jump_marker>().thread_id;
 				return false;
 			}
 
 			// If it's a thread end, we need to skip to the matching thread start
-			if (elem.data.is_thread_end()) {
-				thread = elem.data.as_thread_id();
+			if (elem.data.type() == value_type::thread_end) {
+				thread = elem.data.get<value_type::thread_end>();
 				return false;
 			}
 
@@ -302,7 +318,7 @@ namespace ink::runtime::internal
 		});
 
 		if (frame != nullptr && returnType != nullptr)
-			*returnType = get_frame_type(frame->data.get_data_type());
+			*returnType = get_frame_type(frame->data.type());
 
 		// Return true if a frame was found
 		return frame != nullptr;
@@ -316,7 +332,12 @@ namespace ink::runtime::internal
 	void basic_stack::mark_strings(string_table& strings) const
 	{
 		// Mark all strings
-		base::for_each_all([&strings](const entry& elem) { elem.data.mark_strings(strings); });
+		base::for_each_all(
+			[&strings](const entry& elem) {
+				if (elem.data.type() == value_type::string) {
+					strings.mark_used(elem.data.get<value_type::string>());
+				}
+		});
 	}
 
 	thread_t basic_stack::fork_thread()
@@ -325,11 +346,10 @@ namespace ink::runtime::internal
 		thread_t new_thread = _next_thread++;
 
 		// Push a thread start marker here
-		entry& thread_entry = add(InvalidHash, value(new_thread, data_type::thread_start));
+		entry& thread_entry = add(InvalidHash, value{}.set<value_type::thread_start>(new_thread, 0u));
 
 		// Set stack jump counter for thread to 0. This number is used if the thread ever
 		//  tries to pop past its origin. It keeps track of how much of the preceeding stack it's popped back
-		thread_entry.data.thread_jump() = 0;
 
 		return new_thread;
 	}
@@ -337,7 +357,7 @@ namespace ink::runtime::internal
 	void basic_stack::complete_thread(thread_t thread)
 	{
 		// Add a thread complete marker
-		add(InvalidHash, value(thread, data_type::thread_end));
+		add(InvalidHash, value{}.set<value_type::thread_end>(thread));
 	}
 
 	void basic_stack::collapse_to_thread(thread_t thread)
@@ -351,8 +371,8 @@ namespace ink::runtime::internal
 			// Keep popping until we find the requested thread's end marker
 			const entry* top = pop();
 			while (!(
-				top->data.get_data_type() == data_type::thread_end &&
-				top->data.as_divert() == thread))
+				top->data.type() == value_type::thread_end &&
+				top->data.get<value_type::thread_end>() == thread))
 			{
 				inkAssert(!is_empty(), "Ran out of stack while searching for end of thread marker. Did you call complete_thread?");
 				top = pop();
@@ -373,14 +393,14 @@ namespace ink::runtime::internal
 			}
 
 			// Thread end. We just need to delete this whole block
-			if (nulling == ~0 && elem.data.is_thread_end() && elem.name == InvalidHash) {
-				nulling = elem.data.as_divert();
+			if (nulling == ~0 && elem.data.type()  == value_type::thread_end && elem.name == InvalidHash) {
+				nulling = elem.data.get<value_type::thread_end>();
 			}
 
 			// If we're deleting a useless thread block
 			if (nulling != ~0) {
 				// If this is the start of the block, stop deleting
-				if (elem.name == InvalidHash && elem.data.get_data_type() == data_type::thread_start && elem.data.as_divert() == nulling) {
+				if (elem.name == InvalidHash && elem.data.type() == value_type::thread_start && elem.data.get<value_type::thread_start>().jump == nulling) {
 					nulling = ~0;
 				}
 
@@ -390,16 +410,17 @@ namespace ink::runtime::internal
 			else
 			{
 				// Clear thread start markers. We don't need or want them anymore
-				if (elem.name == InvalidHash && (elem.data.is_thread_start() || elem.data.is_jump_marker())) {
+				if (elem.name == InvalidHash &&
+						(elem.data.type() == value_type::thread_start || elem.data.type() == value_type::jump_marker)) {
 					// Clear it out
 					elem.name = NulledHashId;
 
 					// Check if this is a jump, if so we need to ignore even more data
-					jumping = elem.data.thread_jump();
+					jumping = elem.data.get<value_type::jump_marker>().thread_id;
 				}
 
 				// Clear thread frame markers. We can't use them anymore
-				if (elem.name == InvalidHash && elem.data.get_data_type() == data_type::thread_frame) {
+				if (elem.name == InvalidHash && elem.data.type() == value_type::thread_frame) {
 					elem.name = NulledHashId;
 				}
 			}
@@ -449,7 +470,7 @@ namespace ink::runtime::internal
 
 	value basic_eval_stack::pop()
 	{
-		return base::pop([](const value& v) { return v.is_none(); });
+		return base::pop([](const value& v) { return v.type() == value_type::none; });
 	}
 
 	const value& basic_eval_stack::top() const
@@ -470,7 +491,14 @@ namespace ink::runtime::internal
 	void basic_eval_stack::mark_strings(string_table& strings) const
 	{
 		// Iterate everything (including what we have saved) and mark strings
-		base::for_each_all([&strings](const value& elem) { elem.mark_strings(strings); });
+		base::for_each_all([&strings](const value& elem) {
+				if (elem.type() == value_type::string) {
+					string_type str = elem.get<value_type::string>();
+					if (str.allocated) {
+						strings.mark_used(str.str);
+					}
+				}
+			});
 	}
 
 	void basic_eval_stack::save()
@@ -486,7 +514,7 @@ namespace ink::runtime::internal
 	void basic_eval_stack::forget()
 	{
 		// Clear out
-		data x; x.set_none();
+		value x; x.set<value_type::none>();
 		value none = value(x);
 		base::forget([&none](value& elem) { elem = none; });
 	}

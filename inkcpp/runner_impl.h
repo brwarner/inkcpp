@@ -16,6 +16,8 @@
 #include "runner.h"
 #include "choice.h"
 
+#include "executioner.h"
+
 namespace ink::runtime::internal
 {
 	class story_impl;
@@ -128,6 +130,7 @@ namespace ink::runtime::internal
 	private:
 		const story_impl* const _story;
 		story_ptr<globals_impl> _globals;
+		executer _operations;
 
 		// == State ==
 
@@ -144,7 +147,7 @@ namespace ink::runtime::internal
 
 		// Evaluation stack
 		bool bEvaluationMode = false;
-		internal::eval_stack<20> _eval;
+		internal::eval_stack _eval;
 		bool bSavedEvaluationMode = false;
 
 		// Keeps track of what threads we're inside

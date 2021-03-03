@@ -117,11 +117,17 @@ namespace ink
 	};
 #endif
 
-	namespace runtime::internal
-	{
+	namespace runtime::internal {
 		template<typename T>
-		struct always_false { static constexpr bool value = false; };
+		struct always_false {
+			static constexpr bool value = false;
+		};
+		template<bool con, typename T>
+		struct enable_if {};
+		template<typename T>
+		struct enable_if<true, T> { using type = T; };
 	}
+
 
 #ifdef INK_ENABLE_STL
 	template<typename T>

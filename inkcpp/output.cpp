@@ -13,23 +13,23 @@ namespace ink
 	{
 		namespace internal
 		{
-			basic_stream::basic_stream(data* buffer, size_t len)
+			basic_stream::basic_stream(value* buffer, size_t len)
 				: _data(buffer), _max(len), _size(0), _save(~0)
 			{}
 
-			void basic_stream::append(const data& in)
+			void basic_stream::append(const value& in)
 			{
 				// SPECIAL: Incoming newline
-				if (in.type == data_type::newline && _size > 1)
+				if (in.type() == value_type::newline && _size > 1)
 				{
 					// If the end of the stream is a function start marker, we actually
 					//  want to ignore this. Function start trimming.
-					if (_data[_size - 1].type == data_type::func_start)
+					if (_data[_size - 1].type() == value_type::func_start)
 						return;
 				}
 
 				// Ignore leading newlines
-				if (in.type == data_type::newline && _size == 0)
+				if (in.type() == value_type::newline && _size == 0)
 					return;
 
 				// Add to data stream
@@ -38,23 +38,23 @@ namespace ink
 
 				// Special: Incoming glue. Trim whitespace/newlines prior
 				//  This also applies when a function ends to trim trailing whitespace.
-				if ((in.type == data_type::glue || in.type == data_type::func_end) && _size > 1)
+				if ((in.type() == value_type::glue || in.type() == value_type::func_end) && _size > 1)
 				{
 					// Run backwards
 					size_t i = _size - 2;
 					while(true)
 					{
-						data& d = _data[i];
+						value& d = _data[i];
 
 						// Nullify newlines
-						if (d.type == data_type::newline)
-							d.type = data_type::none;
+						if (d.type() == value_type::newline) {
+							d = value{};
+						}
 
 						// Nullify whitespace
-						else if (
-							(d.type == data_type::string_table_pointer || d.type == data_type::allocated_string_pointer)
-							&& is_whitespace(d.string_val))
-							d.type = data_type::none;
+						else if ( d.type() == value_type::string 
+							&& is_whitespace(d.get<value_type::string>()))
+							d = value{};
 
 						// If it's not a newline or whitespace, stop
 						else break;
@@ -69,7 +69,7 @@ namespace ink
 				}
 			}
 
-			void basic_stream::append(const data* in, unsigned int length)
+			void basic_stream::append(const value* in, unsigned int length)
 			{
 				// TODO: Better way to bulk while still executing glue checks?
 				for (size_t i = 0; i < length; i++)
@@ -94,23 +94,13 @@ namespace ink
 				output.put(c);
 			}
 
-			inline bool get_next(const data* list, size_t i, size_t size, const data** next)
+			inline bool get_next(const value* list, size_t i, size_t size, const value** next)
 			{
 				while (i + 1 < size)
 				{
 					*next = &list[i + 1];
-					data_type type = (*next)->type;
-					switch (type)
-					{
-					case data_type::int32:
-					case data_type::float32:
-					case data_type::uint32:
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
-					case data_type::newline:
-						return true;
-					}
-
+					value_type type = (*next)->type();
+					if ((*next)->printable()) { return true; }
 					i++;
 				}
 
@@ -141,18 +131,17 @@ namespace ink
 							}
 
 							// check what the next item
-							const data* next = nullptr;
+							const value* next = nullptr;
 							if (get_next(_data, dataIter, _size, &next))
 							{
 								// If it's a newline, ignore all our whitespace
-								if (next->type == data_type::newline)
+								if (next->type() == value_type::newline)
 									return;
 
 								// If it's another string, check if it starts with whitespace
-								if (next->type == data_type::allocated_string_pointer ||
-									next->type == data_type::string_table_pointer)
+								if (next->type() == value_type::string )
 								{
-									if (is_whitespace(next->string_val[0]))
+									if (is_whitespace(next->get<value_type::string>()[0]))
 										return;
 								}
 
@@ -190,23 +179,10 @@ namespace ink
 				{
 					if (should_skip(i, hasGlue, lastNewline))
 						continue;
-
-					switch (_data[i].type)
-					{
-					case data_type::int32:
-						str << _data[i].integer_value;
-						break;
-					case data_type::float32:
-						str << std::setprecision(7) << _data[i].float_value;
-						break;
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
-						copy_string(_data[i].string_val, i, str);
-						break;
-					case data_type::newline:
-						str << std::endl;
-						break;
+					if (_data[i].printable()){
+						str << _data[i];
 					}
+
 				}
 
 				// Reset stream size to where we last held the marker
@@ -234,15 +210,14 @@ namespace ink
 
 					switch (_data[i].type)
 					{
-					case data_type::int32:
+					case value_type::int32:
 						str += FString::Printf(TEXT("%d"), _data[i].integer_value);
 						break;
-					case data_type::float32:
+					case value_type::float32:
 						// TODO: Whitespace cleaning
 						str += FString::Printf(TEXT("%f"), _data[i].float_value);
 						break;
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
+					case value_type::string:
 						str += _data[i].string_val;
 						break;
 					case data_type::newline:
@@ -265,7 +240,7 @@ namespace ink
 				return _size - start;
 			}
 
-			const data& basic_stream::peek() const
+			const value& basic_stream::peek() const
 			{
 				inkAssert(_size > 0, "Attempting to peek empty stream!");
 				return _data[_size - 1];
@@ -279,12 +254,12 @@ namespace ink
 					_size = 0;
 			}
 
-			void basic_stream::get(data* ptr, size_t length)
+			void basic_stream::get(value* ptr, size_t length)
 			{
 				// Find start
 				size_t start = find_start();
 
-				const data* end = ptr + length;
+				const value* end = ptr + length;
 				//inkAssert(_size - start < length, "Insufficient space in data array to store stream contents!");
 
 				// Move up from marker
@@ -298,15 +273,8 @@ namespace ink
 					inkAssert(ptr < end, "Insufficient space in data array to store stream contents!");
 
 					// Copy any value elements
-					switch (_data[i].type)
-					{
-					case data_type::int32:
-					case data_type::float32:
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
-					case data_type::newline:
+					if (_data[i].printable()) {
 						*(ptr++) = _data[i];
-						break;
 					}
 				}
 
@@ -319,29 +287,29 @@ namespace ink
 				// TODO: Cache?
 				for (size_t i = 0; i < _size; i++)
 				{
-					if (_data[i].type == data_type::marker)
+					if (_data[i].type() == value_type::marker)
 						return true;
 				}
 
 				return false;
 			}
 
-			bool basic_stream::ends_with(data_type type) const
+			bool basic_stream::ends_with(value_type type) const
 			{
 				if (_size == 0)
 					return false;
 
-				return _data[_size - 1].type == type;
+				return _data[_size - 1].type() == type;
 			}
 
-			bool basic_stream::saved_ends_with(data_type type) const
+			bool basic_stream::saved_ends_with(value_type type) const
 			{
 				inkAssert(_save != ~0, "Stream is not saved!");
 
 				if (_save == 0)
 					return false;
 
-				return _data[_save - 1].type == type;
+				return _data[_save - 1].type() == type;
 			}
 
 			void basic_stream::save()
@@ -383,21 +351,8 @@ namespace ink
 					if (should_skip(i, hasGlue, lastNewline))
 						continue;
 
-					switch (_data[i].type)
-					{
-					case data_type::int32:
-						length += decimal_digits(_data[i].integer_value);
-						break;
-					case data_type::float32:
-						length += decimal_digits(_data[i].float_value);
-						break;
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
-						length += strlen(_data[i].string_val);
-						break;
-					case data_type::newline:
-						length += 1;
-						break;
+					if (_data[i].printable()) {
+						length += value_length(_data[i]);
 					}
 				}
 
@@ -410,29 +365,24 @@ namespace ink
 				{
 					if (should_skip(i, hasGlue, lastNewline))
 						continue;
-
-					switch (_data[i].type)
+					switch (_data[i].type())
 					{
-					case data_type::int32:
+					case value_type::int32:
+					case value_type::float32:
+					case value_type::uint32:
 						// Convert to string and advance
-						toStr(ptr, end - ptr, _data[i].integer_value);
+						toStr(ptr, end - ptr, _data[i]);
 						while (*ptr != 0) ptr++;
 
 						break;
-					case data_type::float32:
-						// Convert to string and advance
-						toStr(ptr, end - ptr, _data[i].float_value);
-						while (*ptr != 0) ptr++;
-
-						break;
-					case data_type::string_table_pointer:
-					case data_type::allocated_string_pointer:
+					case value_type::string:
 						// Copy string and advance
-						copy_string(_data[i].string_val, i, ptr);
+						copy_string(_data[i].get<value_type::string>(), i, ptr);
 						break;
-					case data_type::newline:
+					case value_type::newline:
 						*ptr = '\n'; ptr++;
 						break;
+					default: throw ink_exception("cant convert expression to string!");
 					}
 				}
 
@@ -454,7 +404,7 @@ namespace ink
 				while (start > 0)
 				{
 					start--;
-					if (_data[start].type == data_type::marker)
+					if (_data[start].type() == value_type::marker)
 						break;
 				}
 
@@ -467,25 +417,25 @@ namespace ink
 
 			bool basic_stream::should_skip(size_t iter, bool& hasGlue, bool& lastNewline) const
 			{
-				switch (_data[iter].type)
+				switch (_data[iter].type())
 				{
-				case data_type::int32:
-				case data_type::float32:
-				case data_type::string_table_pointer:
-				case data_type::allocated_string_pointer:
+				case value_type::int32:
+				case value_type::float32:
+				case value_type::string:
 					hasGlue = false;
 					lastNewline = false;
 					break;
-				case data_type::newline:
+				case value_type::newline:
 					if (lastNewline)
 						return true;
 					if (hasGlue)
 						return true;
 					lastNewline = true;
 					break;
-				case data_type::glue:
+				case value_type::glue:
 					hasGlue = true;
 					break;
+				default: break;
 				}
 
 				return false;
@@ -496,11 +446,11 @@ namespace ink
 				// Check if there is text past the save
 				for (size_t i = _save; i < _size; i++)
 				{
-					const data& d = _data[i];
-					if (d.type == data_type::allocated_string_pointer || d.type == data_type::string_table_pointer)
+					const value& d = _data[i];
+					if (d.type() == value_type::string)
 					{
 						// TODO: Cache what counts as whitespace?
-						if (!is_whitespace(d.string_val, false))
+						if (!is_whitespace(d.get<value_type::string>(), false))
 							return true;
 					}
 				}
@@ -520,8 +470,12 @@ namespace ink
 				// Find all allocated strings and mark them as used
 				for (int i = 0; i < _size; i++)
 				{
-					if (_data[i].type == internal::data_type::allocated_string_pointer)
-						strings.mark_used(_data[i].string_val);
+					if (_data[i].type() == value_type::string) {
+						string_type str = _data[i].get<value_type::string>();
+						if (str.allocated) {
+							strings.mark_used(str.str);
+						}
+					}
 				}
 			}
 
@@ -546,11 +500,6 @@ namespace ink
 			}
 #endif
 
-			basic_stream& operator<<(basic_stream& out, const data& in)
-			{
-				out.append(in);
-				return out;
-			}
 
 		}
 	}
