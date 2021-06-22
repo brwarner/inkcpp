@@ -4,6 +4,7 @@
 #include "array.h"
 #include "globals.h"
 #include "string_table.h"
+#include "list_table.h"
 #include "stack.h"
 
 namespace ink::runtime::internal
@@ -20,16 +21,16 @@ namespace ink::runtime::internal
 		virtual ~globals_impl() { }
 
 	protected:
-		const uint32_t* get_uint(hash_t name) const override;
+		optional<uint32_t> get_uint(hash_t name) const override;
 		bool set_uint(hash_t name, uint32_t value) override;
 
-	  	const int32_t* get_int(hash_t name) const override;
+	  	optional<int32_t> get_int(hash_t name) const override;
 		bool set_int(hash_t name, int32_t value) override;
 
-		const float* get_float(hash_t name) const override;
+		optional<float> get_float(hash_t name) const override;
 		bool set_float(hash_t name, float value) override;
 
-		const char * const * get_str(hash_t name) const override;
+		optional<const char*> get_str(hash_t name) const override;
 		bool set_str(hash_t name, const char* value) override;
 
 	public:
@@ -58,6 +59,9 @@ namespace ink::runtime::internal
 
 		// gets the allocated string table
 		inline string_table& strings() { return _strings; }
+
+		// gets list entries
+		list_table& lists() { return _lists; }
 
 		// run garbage collection
 		void gc();
@@ -89,11 +93,11 @@ namespace ink::runtime::internal
 
 		// Allocated string table (shared by all runners using this global store)
 		mutable string_table _strings;
+		mutable list_table _lists;
 
-		// Global variables (TODO: Max 50?)
 		//  Implemented as a stack (slow lookup) because it has save/restore functionality.
 		//  If I could create an avl tree with save/restore, that'd be great but seems super complex.
-		internal::stack<50> _variables;
+		internal::stack<abs(config::limitGlobalVariables), config::limitGlobalVariables < 0> _variables;
 		bool _globals_initialized;
 	};
 }

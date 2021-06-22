@@ -4,9 +4,10 @@ add_executable(inkcpp_test catch.hpp Main.cpp
     Stack.cpp
     Callstack.cpp
     Restorable.cpp
-    Value.cpp
-    Globals.cpp
-    Tags.cpp
+	Value.cpp
+	Globals.cpp
+	Lists.cpp
+	Tags.cpp
     )
 
 target_link_libraries(inkcpp_test PUBLIC inkcpp inkcpp_compiler)
