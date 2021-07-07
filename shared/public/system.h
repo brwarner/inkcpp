@@ -119,8 +119,24 @@ namespace ink
 
 	namespace runtime::internal
 	{
+		constexpr unsigned abs(int i) { return i < 0 ? -i : i; }
+
 		template<typename T>
 		struct always_false { static constexpr bool value = false; };
+
+		template<bool Con, typename T1, typename T2>
+		struct if_type { using type = T1; };
+		template<typename T1, typename T2>
+		struct if_type<false, T1, T2> { using type = T2; };
+		template<bool Con, typename T1, typename T2>
+		using if_t = typename if_type<Con, T1, T2>::type;
+
+		template<bool Enable, typename T = void>
+		struct enable_if { };
+		template<typename T>
+		struct enable_if<true, T> { using type = T; };
+		template<bool Enable, typename T = void>
+		using enable_if_t = typename enable_if<Enable, T>::type;
 	}
 
 #ifdef INK_ENABLE_STL

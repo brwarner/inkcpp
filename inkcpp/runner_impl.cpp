@@ -50,19 +50,20 @@ namespace ink::runtime::internal
 
 	choice& runner_impl::add_choice()
 	{
-		inkAssert(_num_choices < MAX_CHOICES, "Ran out of choice storage!");
-		return _choices[_num_choices++];
+		inkAssert(config::maxChoices < 0 || _choices.size() < config::maxChoices,
+				"Ran out of choice storage!");
+		return _choices.push();
 	}
 
 	void runner_impl::clear_choices()
 	{
-		// TODO: Garbage collection?
-		_num_choices = 0;
+		// TODO: Garbage collection? ? which garbage ?
+		_choices.clear();
 	}
 
 	void runner_impl::clear_tags()
 	{
-		_num_tags = 0;
+		_tags.clear();
 	}
 
 	void runner_impl::jump(ip_t dest, bool record_visits)
@@ -246,8 +247,8 @@ namespace ink::runtime::internal
 	}
 
 	runner_impl::runner_impl(const story_impl* data, globals global)
-		: _story(data), _globals(global.cast<globals_impl>()), _container(~0), _threads(~0), 
-		_threadDone(nullptr, (ip_t)~0), _backup(nullptr), _done(nullptr), _choices()
+		: _story(data), _globals(global.cast<globals_impl>()), _container(~0),
+		_backup(nullptr), _done(nullptr), _choices()
 	{
 		_ptr = _story->instructions();
 		bEvaluationMode = false;
@@ -367,7 +368,7 @@ namespace ink::runtime::internal
 
 	void runner_impl::choose(size_t index)
 	{
-		inkAssert(index < _num_choices, "Choice index out of range");
+		inkAssert(index < _choices.size(), "Choice index out of range");
 
 		// Get the choice
 		const auto& c = _choices[index];
@@ -380,7 +381,7 @@ namespace ink::runtime::internal
 		if (choiceThread == ~0)
 			prev = _done;
 		else
-			prev = _threadDone.get(choiceThread);
+			prev = _threads.get(choiceThread);
 
 		// Make sure we have a previous pointer
 		inkAssert(prev != nullptr, "No 'done' point recorded before finishing choice output");
@@ -392,7 +393,6 @@ namespace ink::runtime::internal
 		// Collapse callstacks to the correct thread
 		_stack.collapse_to_thread(choiceThread);
 		_threads.clear();
-		_threadDone.clear(nullptr);
 
 		// Jump to destination and clear choice list
 		jump(_story->instructions() + _choices[index].path());
@@ -409,17 +409,17 @@ namespace ink::runtime::internal
 
 	bool runner_impl::has_tags() const
 	{
-		return _num_tags > 0;
+		return _tags.size() > 0;
 	}
 
 	size_t runner_impl::num_tags() const
 	{
-		return _num_tags;
+		return _tags.size();
 	}
 
 	const char* runner_impl::get_tag(size_t index) const
 	{
-		inkAssert(index < _num_tags, "Tag index exceeds _num_tags");
+		inkAssert(index < _tags.size(), "Tag index exceeds _num_tags");
 		return _tags[index];
 	}
 
@@ -892,7 +892,7 @@ namespace ink::runtime::internal
 				for(;sc;--sc) { _output << stack[sc-1]; }
 
 				// Create choice and record it
-				add_choice().setup(_output, _globals->strings(), _num_choices, path, current_thread());
+				add_choice().setup(_output, _globals->strings(), _choices.size(), path, current_thread());
 			} break;
 			case Command::START_CONTAINER_MARKER:
 			{
@@ -978,7 +978,7 @@ namespace ink::runtime::internal
 			} break;
 			case Command::TAG:
 			{
-				_tags[_num_tags++] = read<const char*>();
+				_tags.push() = read<const char*>();
 			} break;
 			default:
 				inkAssert(false, "Unrecognized command!");
@@ -1023,7 +1023,7 @@ namespace ink::runtime::internal
 			_done = ptr;
 		}
 		else {
-			_threadDone.set(curr, ptr);
+			_threads.set(curr, ptr);
 		}
 	}
 
@@ -1033,10 +1033,9 @@ namespace ink::runtime::internal
 		_output.clear();
 		_stack.clear();
 		_threads.clear();
-		_threadDone.clear(nullptr);
 		bEvaluationMode = false;
 		_saved = false;
-		_num_choices = 0;
+		_choices.clear();
 		_ptr = nullptr;
 		_done = nullptr;
 		_container.clear();
@@ -1050,7 +1049,7 @@ namespace ink::runtime::internal
 		_eval.mark_strings(strings);
 
 		// Take into account choice text
-		for (int i = 0; i < _num_choices; i++)
+		for (int i = 0; i < _choices.size(); i++)
 			strings.mark_used(_choices[i]._text);
 	}
 
@@ -1066,7 +1065,6 @@ namespace ink::runtime::internal
 		_globals->save();
 		_eval.save();
 		_threads.save();
-		_threadDone.save();
 		bSavedEvaluationMode = bEvaluationMode;
 
 		// Not doing this anymore. There can be lingering stack entries from function returns
@@ -1084,7 +1082,6 @@ namespace ink::runtime::internal
 		_globals->restore();
 		_eval.restore();
 		_threads.restore();
-		_threadDone.restore();
 		bEvaluationMode = bSavedEvaluationMode;
 
 		// Not doing this anymore. There can be lingering stack entries from function returns
@@ -1105,7 +1102,6 @@ namespace ink::runtime::internal
 		_globals->forget();
 		_eval.forget();
 		_threads.forget();
-		_threadDone.forget();
 
 		// Nothing to do for eval stack. It should just stay as it is
 
